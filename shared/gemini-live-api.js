@@ -3,6 +3,7 @@ class GeminiLiveAPI {
     this.ws = new WebSocket(endpoint);
     this.onSetupComplete = () => {};
     this.onAudioData = () => {};
+    this.onTextData = () => {};
     this.onInterrupted = () => {};
     this.onTurnComplete = () => {};
     this.onError = () => {};
@@ -48,13 +49,17 @@ class GeminiLiveAPI {
             this.onInterrupted();
             return;
           }
-
-          if (wsResponse.serverContent.modelTurn?.parts?.[0]?.inlineData) {
-            const audioData = wsResponse.serverContent.modelTurn.parts[0].inlineData.data;
-            this.onAudioData(audioData);
-
-            if (!wsResponse.serverContent.turnComplete) {
-              this.sendContinueSignal();
+          if (wsResponse.serverContent.modelTurn?.parts) {
+            for (const part of wsResponse.serverContent.modelTurn.parts) {
+              if (part.inlineData) {
+                const audioData = part.inlineData.data;
+                this.onAudioData(audioData);
+                if (!wsResponse.serverContent.turnComplete) {
+                  this.sendContinueSignal();
+                }
+              } else if (part.text) {
+                this.onTextData(part.text);
+              }
             }
           }
 

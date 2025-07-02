@@ -17,6 +17,7 @@
     </button>
   </div>
   <div id="output"></div>
+  <div id="transcription"></div>
 
   <!-- Load EventEmitter3 first -->
   <script src="https://cdn.jsdelivr.net/npm/eventemitter3@5.0.1/dist/eventemitter3.umd.min.js"></script>
@@ -30,6 +31,7 @@
     import { AudioStreamer } from './shared/audio-streamer.js';
 
     const output = document.getElementById('output');
+    const transcription = document.getElementById("transcription");
     const apiKey = "PUT YOUR PRIVATE API KEY";
     const host = 'generativelanguage.googleapis.com';
     const endpoint = `wss://${host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
@@ -132,6 +134,10 @@
         await playAudioChunk(audioData);
       };
 
+      geminiAPI.onTextData = (text) => {
+        addTranscript(text);
+      };
+
       geminiAPI.onInterrupted = () => {
         logMessage('Gemini: Interrupted');
         isInterrupted = true;
@@ -178,6 +184,12 @@
       const messageElement = document.createElement('p');
       messageElement.textContent = message;
       output.appendChild(messageElement);
+    }
+
+    function addTranscript(text) {
+      const elem = document.createElement("p");
+      elem.textContent = text;
+      transcription.appendChild(elem);
     }
   </script>
 </body>
