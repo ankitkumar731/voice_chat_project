@@ -198,3 +198,4 @@ class GeminiLiveAPI {
     });
   }
 } 
+export default GeminiLiveAPI;
