@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Gemini Audio-to-Audio WebSocket Demo (Dev API)</title>
+  <link rel="stylesheet" href="./shared/style.css">
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/franc-min@6.1.0/franc-min.min.js"></script>
+
+
+  <style>
+    #qa-pairs {
+      max-height: 350px;
+      /* Or adjust to your preference */
+      overflow-y: auto;
+      background: #f4f4f4;
+      padding: 10px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      border-radius: 8px;
+      border: 1px solid #e0e0e0;
+    }
+  </style>
+
+</head>
+
+<body>
+  <div class="header-section">
+    <h1>Gemini Live Audio Chat</h1>
+  </div>
+
+  <div class="input-container">
+    <button id="micButton" onclick="toggleMicrophone()" disabled class="action-button">
+      <span class="material-symbols-outlined">mic</span>
+    </button>
+  </div>
+
+  <div id="output"></div>
+
+  <div style="margin-top: 2rem;">
+    <h3>Interview Transcript (Q&A)</h3>
+    <div id="qa-pairs">
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/eventemitter3@5.0.1/dist/eventemitter3.umd.min.js"></script>
+  <script src="./shared/gemini-live-api.js"></script>
+
+  <script type="module">
+    import { AudioRecorder } from './shared/audio-recorder.js';
+    import { AudioStreamer } from './shared/audio-streamer.js';
+
+    let interviewTimer = null;
+    window.interviewTranscript = [];
+    let sessionState = 'idle';
+
+    const output = document.getElementById('output');
+    const apiKey = "AIzaSyB3HLb0TmvqHCoovYqYaSq0fJvHARn9FXk";
+    const host = 'generativelanguage.googleapis.com';
+    const endpoint = `wss://${host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+
+    let audioContext;
+    let audioStreamer;
+    let audioRecorder;
+    let isRecording = false;
+    let initialized = false;
+    let isInterrupted = false;
+    let geminiAPI = new GeminiLiveAPI(endpoint);
+
+    async function ensureAudioInitialized() {
+      if (!initialized) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+        audioStreamer = new AudioStreamer(audioContext);
+        await audioContext.resume();
+        initialized = true;
+        console.log('Audio context initialized:', audioContext.state);
+      }
+    }
+
+    async function playAudioChunk(base64AudioChunk) {
+      try {
+        await ensureAudioInitialized();
+        const arrayBuffer = base64ToArrayBuffer(base64AudioChunk);
+        const uint8Array = new Uint8Array(arrayBuffer);
+        audioStreamer.addPCM16(uint8Array);
+        audioStreamer.resume();
+      } catch (error) {
+        console.error('Error queuing audio chunk:', error);
+      }
+    }
+
+    async function startRecording() {
+      try {
+        await ensureAudioInitialized();
+        isInterrupted = false;
+        audioStreamer.stop();
+
+        // Removed the lines that attempt to clear non-existent transcript elements
+        document.getElementById('qa-pairs').innerHTML = ''; // Clear Q&A section on new recording
+
+        if (geminiAPI.ws.readyState !== WebSocket.OPEN) {
+          geminiAPI = new GeminiLiveAPI(endpoint);
+          setupGeminiHandlers();
+          await new Promise((resolve) => {
+            geminiAPI.onSetupComplete = () => {
+              resolve();
+              document.getElementById('micButton').disabled = false;
+            };
+          });
+        }
+
+        audioRecorder = new AudioRecorder();
+        await audioRecorder.start();
+
+        audioRecorder.on('data', (base64Data) => {
+          geminiAPI.sendAudioChunk(base64Data);
+        });
+
+        logMessage('Recording started...');
+
+        // start 1- minute interview timer
+        interviewTimer = setTimeout(()=>{
+          stopRecording();
+          sessionState = 'ended';
+          requestInterviewFeedback();
+        }, 30000);
+        
+        sessionState = 'recording';
+        window.interviewTranscript = [];
+
+        //
+
+        isRecording = true;
+        document.getElementById('micButton').innerHTML = '<span class="material-symbols-outlined">stop</span>';
+      } catch (error) {
+        console.error('Error starting recording:', error);
+        logMessage('Error starting recording: ' + error.message);
+      }
+    }
+
+    function stopRecording() {
+      if (audioRecorder) {
+        audioRecorder.stop();
+        audioRecorder.off('data');
+        logMessage('Recording stopped.');
+        isRecording = false;
+        document.getElementById('micButton').innerHTML = '<span class="material-symbols-outlined">mic</span>';
+        isInterrupted = false;
+        //geminiAPI.sendEndMessage();
+
+        if (interviewTimer) {
+          clearTimeout(interviewTimer);
+          interviewTimer = null;
+        }
+
+        sessionState = 'ended';
+        logMessage('Interview session ended. Please Wait for the Feedback.');
+
+        geminiAPI.sendMessage();
+      }
+    }
+
+    function setupGeminiHandlers() {
+      geminiAPI.onSetupComplete = () => {
+        document.getElementById('micButton').disabled = false;
+      };
+
+      geminiAPI.onAudioData = async (audioData) => {
+        if (!audioStreamer.isPlaying) {
+          // logMessage('Gemini: Speaking...');
+        }
+        await playAudioChunk(audioData);
+      };
+
+      geminiAPI.onInterrupted = () => {
+        //logMessage('Gemini: Interrupted');
+        isInterrupted = true;
+        audioStreamer.stop();
+      };
+
+      geminiAPI.onTurnComplete = () => {
+        // logMessage('Gemini: Finished speaking');
+        isInterrupted = false;
+        audioStreamer.complete();
+      };
+
+      geminiAPI.onError = (message) => {
+        logMessage(message);
+      };
+
+      geminiAPI.onClose = (event) => {
+        logMessage(`Connection closed`);
+      };
+
+      // Removed the handlers for input-transcript and output-transcript as they are no longer in HTML
+      geminiAPI.onInputTranscriptionData = (text) => {
+        console.log("📥 Handler triggered: ", text);
+        // const el = document.getElementById("input-transcript"); // This line was causing the error if uncommented
+        // if (el) el.textContent += text + ''
+        // el.scrollTop = el.scrollHeight;
+      };
+
+      geminiAPI.onOutputTranscriptionData = (text) => {
+        console.log("📤 Handler triggered: ", text);
+        // const el = document.getElementById("output-transcript"); // This line was causing the error if uncommented
+        // if (el) el.textContent += text + ''
+        // el.scrollTop = el.scrollHeight;
+      };
+
+      geminiAPI.onTurnPairAvailable = ({ question, answer }) => {
+        if (!question || !answer) return; // Skip partials or turns without both
+        console.log("Turn Pair Available - Question:", question, "Answer:", answer);
+
+        window.interviewTranscript.push({question, answer});
+        console.log("Stored Q&A pair in interviewTranscript", { question, answer})
+        const qaEl = document.getElementById("qa-pairs");
+        if (qaEl) {
+          const block = document.createElement("div");
+          block.style.marginBottom = "1em"; // Adds space between Q&A pairs
+          block.style.padding = "0.5em";
+          block.style.border = "1px solid #ddd";
+          block.style.borderRadius = "5px";
+
+          const questionEl = document.createElement("p");
+          questionEl.innerHTML = `<strong>User:</strong> ${question.replace(/\s+/g, ' ').trim()}`;
+          block.appendChild(questionEl);
+
+          const answerEl = document.createElement("p");
+          answerEl.innerHTML = `<strong>Gemini:</strong> ${answer.replace(/\s+/g, ' ').trim()}`;
+          block.appendChild(answerEl);
+
+          qaEl.appendChild(block);
+          qaEl.scrollTop = qaEl.scrollHeight;
+        }
+      };
+    }
+
+    setupGeminiHandlers();
+
+    window.toggleMicrophone = function () {
+      if (isRecording) {
+        stopRecording();
+      } else {
+        startRecording();
+      }
+    };
+
+    function base64ToArrayBuffer(base64) {
+      const binaryString = atob(base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      return bytes.buffer;
+    }
+
+    function logMessage(message) {
+      const messageElement = document.createElement('p');
+      messageElement.textContent = message;
+      output.appendChild(messageElement);
+    }
+
+    window.requestInterviewFeedback = async function () {
+      console.log("Request feedback function triggered");
+      console.log("Transcript length:", window.interviewTranscript.length);
+      if (window.interviewTranscript.length == 0) {
+        console.warn("No transcription available for feedback.");
+        return;
+      }
+
+      // translate transcript to English on the server
+      const translateRes = await fetch("http://localhost:8000/translate-transcript", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transcript: window.interviewTranscript })
+      });
+
+      const translated = await translateRes.json();
+      const processedTranscript = translated.transcript || window.interviewTranscript;
+
+      const combinedTranscript = processedTranscript.map((pair, index) =>
+        `Q${index + 1}: ${pair.question}\nA${index + 1}: ${pair.answer}`
+      ).join('\n\n');
+
+      const prompt = `
+      You are an expert interview coach.
+      Please provide feedback following interview based on:
+      - Answer clarity and relevance
+      - Communication style
+      - Suggestion for improvemen
+      - Overall impression
+
+      Transcript:
+      ${combinedTranscript}
+      `;
+
+      console.log("Prompt being sent to gemini:");
+      console.log(prompt);
+
+      const response = await fetch("http://localhost:8000/generate-feedback", {
+        method: "POST",
+        headers: {"Content-Type" : "application/json"},
+        body: JSON.stringify({ prompt })
+      });
+
+      const result = await response.json();
+      console.log("Gemini response:", result);
+      const feedback = result.candidates?.[0]?.content?.parts?.[0]?.text || "No feedback available";
+      // Store in sessionStorage
+      sessionStorage.setItem('feedback', feedback);
+      sessionStorage.setItem('transcript', JSON.stringify(processedTranscript));
+      // Redirect to feedback page
+      window.location.href = "feedback.html";
+
+
+      // persist transcript on the server
+      await fetch("http://localhost:8000/save-transcript", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transcript: processedTranscript })
+      });
+    }
+
+  </script>
+</body>
+
+</html>
